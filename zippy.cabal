@@ -23,8 +23,19 @@ library
         bytestring,
         digest,
         dlist,
+        utf8-string,
         zlib
     hs-source-dirs:   src
+    default-language: Haskell98
+
+executable zippy
+    import:           warnings
+    main-is:          Main.hs
+    build-depends:
+        base >=4 && <5,
+        optparse-applicative,
+        zippy
+    hs-source-dirs:   app
     default-language: Haskell98
 
 test-suite zippy-tests

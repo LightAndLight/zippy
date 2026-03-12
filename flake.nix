@@ -19,6 +19,7 @@
             fd
 
             zlib
+            zip
             unzip
           ];
         };
