@@ -24,6 +24,7 @@ library
         digest,
         dlist,
         utf8-string,
+        vector,
         zlib
     hs-source-dirs:   src
     default-language: Haskell98
@@ -33,7 +34,9 @@ executable zippy
     main-is:          Main.hs
     build-depends:
         base >=4 && <5,
+        bytestring,
         optparse-applicative,
+        utf8-string,
         zippy
     hs-source-dirs:   app
     default-language: Haskell98

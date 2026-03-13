@@ -2,6 +2,8 @@
 module Zip where
 
 import qualified Codec.Compression.Zlib as Zlib
+import Control.Exception (Exception, throwIO)
+import Control.Monad (unless)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
@@ -13,7 +15,17 @@ import qualified Data.Digest.CRC32 as CRC32
 import Data.Foldable (foldlM)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Word (Word16, Word32, Word64)
-import System.IO (Handle, IOMode (..), SeekMode (..), hClose, hSeek, hSetFileSize, hTell, openFile)
+import System.IO
+  ( Handle
+  , IOMode (..)
+  , SeekMode (..)
+  , hClose
+  , hFileSize
+  , hSeek
+  , hSetFileSize
+  , hTell
+  , openFile
+  )
 
 data ArchiveBuilder
   = ArchiveBuilder
@@ -291,6 +303,348 @@ writeLocalFileHeader fileInfo fileName archive = do
   -- extra field
   pure ()
 
+data Archive
+  = Archive
+  { archiveFile :: !File
+  , archiveCentralDirectory :: !CentralDirectory
+  }
+
+data CentralDirectory
+  = CentralDirectory
+  { centralDirectoryFile :: !File
+  , centralDirectoryOffset :: !Word64
+  , centralDirectorySize :: !Word64
+  , centralDirectoryCount :: !Word64
+  }
+
+findInCentralDirectory ::
+  -- | File name
+  ByteString ->
+  CentralDirectory ->
+  IO (Maybe CentralDirectoryHeader)
+findInCentralDirectory fileName centralDirectory = do
+  let count = centralDirectoryCount centralDirectory
+  let file = centralDirectoryFile centralDirectory
+  let base = centralDirectoryOffset centralDirectory
+  go count file base
+  where
+    go count file base = do
+      signature <- do
+        fileSeek file base
+        readLE32 file
+      unless (signature == 0x02014b50) . error $
+        "missing central file header signature at offset " ++ show base
+
+      fileNameLength <- do
+        fileSeek file $
+          base
+            +
+            -- `file name length` field
+            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
+        readLE16 file
+      extraFieldLength <- readLE16 file
+      fileCommentLength <- readLE16 file
+
+      fileName' <- do
+        fileSeek file $
+          base
+            +
+            -- `file name` field
+            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
+        fileRead file (fromIntegral fileNameLength)
+
+      if fileName == fileName'
+        then do
+          pure $ Just (CentralDirectoryHeader file base)
+        else
+          if count > 1
+            then do
+              let
+                base' =
+                  base +
+                  -- `file name` field
+                  (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4) +
+                  fromIntegral fileNameLength +
+                  fromIntegral extraFieldLength +
+                  fromIntegral fileCommentLength
+              go (count - 1) file base'
+            else
+              pure Nothing
+
+data CentralDirectoryHeader
+  = CentralDirectoryHeader
+  { centralDirectoryHeaderFile :: !File
+  , centralDirectoryHeaderOffset :: !Word64
+  }
+
+centralDirectoryHeaderLocalHeader :: CentralDirectoryHeader -> IO LocalFileHeader
+centralDirectoryHeaderLocalHeader (CentralDirectoryHeader file offset) = do
+  fileSeek file $
+    offset
+      +
+      -- `relative offset of local header` field
+      (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4)
+
+  offset' <- readLE32 file
+
+  fileSeek file $ fromIntegral offset'
+  signature <- readLE32 file
+  unless (signature == 0x04034b50) . error $
+    "missing local file header signature at offset " ++ show offset'
+
+  pure $ LocalFileHeader file (fromIntegral offset')
+
+data LocalFileHeader
+  = LocalFileHeader {localFileHeaderFile :: !File, localFileHeaderOffset :: Word64}
+
+localFileHeaderCompressionMethod :: LocalFileHeader -> IO Word16
+localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
+  fileSeek file $
+    offset
+      +
+      -- `compression method` field
+      (4 + 2 + 2)
+  readLE16 file
+
+localFileHeaderData :: LocalFileHeader -> IO ByteString
+localFileHeaderData (LocalFileHeader file offset) = do
+  fileSeek file $
+    offset
+      +
+      -- `file name length` field
+      (4 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
+  fileNameLength <- readLE16 file
+  extraFieldLength <- readLE16 file
+
+  compressedSize <- do
+    fileSeek file $
+      offset
+        +
+        -- `compressed size` field
+        (4 + 2 + 2 + 2 + 2 + 2 + 4)
+    readLE32 file
+
+  fileSeek file $
+    offset
+      +
+      -- data
+      ( 4
+          + 2
+          + 2
+          + 2
+          + 2
+          + 2
+          + 4
+          + 4
+          + 4
+          + 2
+          + 2
+          + fromIntegral fileNameLength
+          + fromIntegral extraFieldLength
+      )
+  fileRead file $ fromIntegral compressedSize
+
+data File
+  = File
+  { fileRead :: Word64 -> IO ByteString
+  {- ^ Read the given number of bytes from the current seek position.
+
+  Seek position is advanced by the number of bytes read.
+  -}
+  , fileWrite :: ByteString -> IO ()
+  {- ^ Write the value to the current seek position.
+
+  Seek position is advanced by the number of bytes written.
+  -}
+  , fileSeek :: Word64 -> IO ()
+  -- ^ Set the seek position.
+  , fileTell :: IO Word64
+  -- ^ Get the seek position.
+  , fileSize :: IO Word64
+  -- ^ Get the file's size.
+  , fileClose :: IO ()
+  }
+
+data ZipException
+  = EndOfCentralDirectoryRecordNotFound
+  deriving (Show, Eq)
+
+instance Exception ZipException
+
+open :: FilePath -> IO Archive
+open path = do
+  handle <- openFile path ReadWriteMode
+  let
+    file =
+      File
+        { fileRead = handleRead handle
+        , fileWrite = handleWrite handle
+        , fileSeek = handleSeek handle
+        , fileTell = handleTell handle
+        , fileSize = handleSize handle
+        , fileClose = handleClose handle
+        }
+
+  mEndOfCentralDirectoryRecord <- findEndOfCentralDirectoryRecord file
+  case mEndOfCentralDirectoryRecord of
+    Nothing ->
+      throwIO EndOfCentralDirectoryRecordNotFound
+    Just endOfCentralDirectoryRecord -> do
+      offset <- endOfCentralDirectoryRecordCentralDirectoryOffset endOfCentralDirectoryRecord
+      size <- endOfCentralDirectoryRecordCentralDirectorySize endOfCentralDirectoryRecord
+      count <- endOfCentralDirectoryRecordCentralDirectoryCount endOfCentralDirectoryRecord
+      pure
+        Archive
+          { archiveFile = file
+          , archiveCentralDirectory =
+              CentralDirectory
+                { centralDirectoryFile = file
+                , centralDirectoryOffset = fromIntegral offset
+                , centralDirectorySize = fromIntegral size
+                , centralDirectoryCount = fromIntegral count
+                }
+          }
+  where
+    chunkSize :: Word64
+    chunkSize = 512
+
+    findEndOfCentralDirectoryRecord :: File -> IO (Maybe EndOfCentralDirectoryRecord)
+    findEndOfCentralDirectoryRecord file = do
+      size <- fileSize file
+      let chunkOffset = size - chunkSize
+      fileSeek file chunkOffset
+      chunk <- fileRead file chunkSize
+      step file size chunkOffset chunk (chunkSize - 1)
+
+    step ::
+      File ->
+      -- \| File size
+      Word64 ->
+      -- \| Chunk offset
+      Word64 ->
+      -- \| Chunk
+      ByteString ->
+      -- \| Index in chunk
+      Word64 ->
+      IO (Maybe EndOfCentralDirectoryRecord)
+    step file size chunkOffset chunk index =
+      if index < 4
+        then
+          -- signature cannot be (completely) in this chunk
+          nextChunk file size chunkOffset
+        else
+          if ByteString.index chunk (fromIntegral index) == 0x06
+            && ByteString.index chunk (fromIntegral $ index - 1) == 0x05
+            && ByteString.index chunk (fromIntegral $ index - 2) == 0x4b
+            && ByteString.index chunk (fromIntegral $ index - 3) == 0x50
+            then do
+              {- This *may* be the signature.
+
+              Confirm by looking up the `.ZIP file comment length`, then checking that the
+              `.ZIP file comment` extends to the end of the file.
+              -}
+              let candidateSignatureOffset = chunkOffset + index - 3
+              zipFileCommentLength <- do
+                fileSeek file $
+                  candidateSignatureOffset
+                    +
+                    -- `.ZIP file comment length` field
+                    (4 + 2 + 2 + 2 + 2 + 4 + 4)
+                readLE16 file
+              zipFileCommentOffset <- fileTell file
+              if zipFileCommentOffset + fromIntegral zipFileCommentLength == size
+                then
+                  pure $ Just (EndOfCentralDirectoryRecord file candidateSignatureOffset)
+                else
+                  nextChunk file size chunkOffset
+            else
+              step file size chunkOffset chunk (index - 1)
+
+    nextChunk ::
+      File ->
+      -- \| File size
+      Word64 ->
+      -- \| Chunk offset
+      Word64 ->
+      IO (Maybe EndOfCentralDirectoryRecord)
+    nextChunk file size chunkOffset
+      | chunkOffset < chunkSize =
+          pure Nothing
+      | otherwise = do
+          {-
+          We didn't examine the first 3 bytes of the chunk, because they can't
+          form the 4-byte signature. So the next chunk we examine should end
+          with these 3 bytes so we *can* examine them.
+          -}
+          let chunkOffset' = chunkOffset - chunkSize + 3
+          fileSeek file chunkOffset'
+          chunk' <- fileRead file chunkSize
+          step file size chunkOffset' chunk' (chunkSize - 1)
+
+data EndOfCentralDirectoryRecord
+  = EndOfCentralDirectoryRecord
+  { endOfCentralDirectoryRecordFile :: !File
+  , endOfCentralDirectoryRecordOffset :: !Word64
+  }
+
+endOfCentralDirectoryRecordCentralDirectoryCount :: EndOfCentralDirectoryRecord -> IO Word16
+endOfCentralDirectoryRecordCentralDirectoryCount (EndOfCentralDirectoryRecord file offset) = do
+  fileSeek file $ offset + (4 + 2 + 2 + 2)
+  readLE16 file
+
+endOfCentralDirectoryRecordCentralDirectorySize :: EndOfCentralDirectoryRecord -> IO Word32
+endOfCentralDirectoryRecordCentralDirectorySize (EndOfCentralDirectoryRecord file offset) = do
+  fileSeek file $ offset + (4 + 2 + 2 + 2 + 2)
+  readLE32 file
+
+endOfCentralDirectoryRecordCentralDirectoryOffset :: EndOfCentralDirectoryRecord -> IO Word32
+endOfCentralDirectoryRecordCentralDirectoryOffset (EndOfCentralDirectoryRecord file offset) = do
+  fileSeek file $ offset + (4 + 2 + 2 + 2 + 2 + 4)
+  readLE32 file
+
+readLE16 :: File -> IO Word16
+readLE16 file = do
+  bytes <- fileRead file 2
+  pure $!
+    fromIntegral (ByteString.index bytes 0)
+      .|. fromIntegral (ByteString.index bytes 1) `shiftL` 8
+
+readLE32 :: File -> IO Word32
+readLE32 file = do
+  bytes <- fileRead file 4
+  pure $!
+    fromIntegral (ByteString.index bytes 0)
+      .|. fromIntegral (ByteString.index bytes 1) `shiftL` 8
+      .|. fromIntegral (ByteString.index bytes 2) `shiftL` 16
+      .|. fromIntegral (ByteString.index bytes 3) `shiftL` 24
+
+readContent ::
+  -- | File name
+  ByteString ->
+  Archive ->
+  IO (Maybe ByteString)
+readContent fileName archive = do
+  mCentralDirectoryHeader <- findInCentralDirectory fileName (archiveCentralDirectory archive)
+  case mCentralDirectoryHeader of
+    Nothing -> pure Nothing
+    Just centralDirectoryHeader -> do
+      localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
+      compressedContent <- localFileHeaderData localFileHeader
+      compressionMethod <- localFileHeaderCompressionMethod localFileHeader
+      uncompressedContent <-
+        case compressionMethod of
+          0 ->
+            -- The file is stored (no compression)
+            pure compressedContent
+          8 ->
+            -- The file is Deflated
+            pure $!
+              LazyByteString.toStrict
+                (Zlib.decompressWith Zlib.defaultDecompressParams $ LazyByteString.fromStrict compressedContent)
+          _ ->
+            error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
+      pure $ Just uncompressedContent
+
 finish_ :: ArchiveBuilder -> IO ()
 finish_ archive = do
   centralDirectoryOffset <- do
@@ -445,10 +799,11 @@ handleSeek ::
   IO ()
 handleSeek handle pos = hSeek handle AbsoluteSeek (fromIntegral pos)
 
-handleTell ::
-  Handle ->
-  IO Word64
+handleTell :: Handle -> IO Word64
 handleTell = fmap fromIntegral . hTell
+
+handleSize :: Handle -> IO Word64
+handleSize = fmap fromIntegral . hFileSize
 
 handleClose :: Handle -> IO ()
 handleClose = hClose
