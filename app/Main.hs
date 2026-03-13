@@ -39,5 +39,5 @@ create inputs output = do
   for_ inputs $ \input -> do
     putStrLn $ "Adding " ++ input ++ "..."
     Zip.addFile input archive
-  Zip.close archive
+  Zip.finish_ archive
   putStrLn $ "Created " ++ output

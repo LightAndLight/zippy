@@ -15,28 +15,28 @@ import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Word (Word16, Word32, Word64)
 import System.IO (Handle, IOMode (..), SeekMode (..), hClose, hSeek, hSetFileSize, hTell, openFile)
 
-data Archive
-  = Archive
-  { archiveRead :: Word64 -> IO ByteString
+data ArchiveBuilder
+  = ArchiveBuilder
+  { archiveBuilderRead :: Word64 -> IO ByteString
   {- ^ Read the given number of bytes from the current seek position.
 
   Seek position is advanced by the number of bytes read.
   -}
-  , archiveWrite :: ByteString -> IO ()
+  , archiveBuilderWrite :: ByteString -> IO ()
   {- ^ Write the value to the current seek position.
 
   Seek position is advanced by the number of bytes written.
   -}
-  , archiveSeek :: Word64 -> IO ()
+  , archiveBuilderSeek :: Word64 -> IO ()
   -- ^ Set the seek position.
-  , archiveTell :: IO Word64
+  , archiveBuilderTell :: IO Word64
   -- ^ Get the seek position.
-  , archiveClose :: IO ()
+  , archiveBuilderClose :: IO ()
   {- ^ Close the archive.
 
   Archive operations should not be used after closing.
   -}
-  , archiveChanges :: IORef (DList Change)
+  , archiveBuilderChanges :: IORef (DList Change)
   }
 
 data Change
@@ -62,7 +62,7 @@ data FileInfo
   , fileInfoExtraFieldLength :: !Word16
   }
 
-writeFileInfo :: FileInfo -> Archive -> IO ()
+writeFileInfo :: FileInfo -> ArchiveBuilder -> IO ()
 writeFileInfo fileInfo archive = do
   writeLE16 archive $ fileInfoVersionNeededToExtract fileInfo
   writeLE16 archive $ fileInfoGeneralPurposeBitFlag fileInfo
@@ -75,19 +75,19 @@ writeFileInfo fileInfo archive = do
   writeLE16 archive $ fileInfoFileNameLength fileInfo
   writeLE16 archive $ fileInfoExtraFieldLength fileInfo
 
-create :: FilePath -> IO Archive
+create :: FilePath -> IO ArchiveBuilder
 create path = do
   handle <- openFile path ReadWriteMode
   hSetFileSize handle 0
   changesRef <- newIORef DList.empty
   pure
-    Archive
-      { archiveRead = handleRead handle
-      , archiveWrite = handleWrite handle
-      , archiveSeek = handleSeek handle
-      , archiveTell = handleTell handle
-      , archiveClose = handleClose handle
-      , archiveChanges = changesRef
+    ArchiveBuilder
+      { archiveBuilderRead = handleRead handle
+      , archiveBuilderWrite = handleWrite handle
+      , archiveBuilderSeek = handleSeek handle
+      , archiveBuilderTell = handleTell handle
+      , archiveBuilderClose = handleClose handle
+      , archiveBuilderChanges = changesRef
       }
 
 addFile ::
@@ -98,7 +98,7 @@ addFile ::
   * @file's size < 2^32@
   -}
   FilePath ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 addFile fileName archive = do
   content <- ByteString.readFile fileName
@@ -109,7 +109,7 @@ addContent ::
   ByteString ->
   -- | Content (precondition: @length < 2^32@)
   ByteString ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 addContent fileName content = do
   let compressed@(Compressed uncompressedSize crc32 _compression compressedContent) = compress (Deflate Normal) content
@@ -166,11 +166,11 @@ addCompressedContent ::
   ByteString ->
   -- | Compressed content
   Compressed ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 addCompressedContent fileName (Compressed uncompressedSize crc32 compression compressedContent) archive = do
   localHeaderOffset <- do
-    offset <- archiveTell archive
+    offset <- archiveBuilderTell archive
     if offset < 2 ^ (32 :: Int)
       then pure (fromIntegral offset :: Word32)
       else error $ "ZIP file is too large (ZIP64 not yet supported)"
@@ -268,16 +268,16 @@ addCompressedContent fileName (Compressed uncompressedSize crc32 compression com
         , fileInfoExtraFieldLength = 0
         }
   writeLocalFileHeader fileInfo fileName archive
-  archiveWrite archive compressedContent
+  archiveBuilderWrite archive compressedContent
 
   let change = Added localHeaderOffset fileInfo fileName
-  modifyIORef' (archiveChanges archive) (`DList.snoc` change)
+  modifyIORef' (archiveBuilderChanges archive) (`DList.snoc` change)
 
 writeLocalFileHeader ::
   FileInfo ->
   -- | File name
   ByteString ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 writeLocalFileHeader fileInfo fileName archive = do
   -- local file header signature
@@ -286,20 +286,20 @@ writeLocalFileHeader fileInfo fileName archive = do
   writeFileInfo fileInfo archive
 
   -- file name
-  archiveWrite archive fileName
+  archiveBuilderWrite archive fileName
 
   -- extra field
   pure ()
 
-close :: Archive -> IO ()
-close archive = do
+finish_ :: ArchiveBuilder -> IO ()
+finish_ archive = do
   centralDirectoryOffset <- do
-    pos <- archiveTell archive
+    pos <- archiveBuilderTell archive
     if pos < 2 ^ (32 :: Int)
       then pure (fromIntegral pos :: Word32)
       else error "Central directory offset is too large (ZIP64 not yet supported)"
 
-  changes <- fmap DList.toList . readIORef $ archiveChanges archive
+  changes <- fmap DList.toList . readIORef $ archiveBuilderChanges archive
   centralDirectoryCount <- do
     count <-
       foldlM
@@ -317,7 +317,7 @@ close archive = do
       else error "Central directory has too many entries (ZIP64 not yet supported)"
 
   endOfCentralDirectoryOffset <- do
-    pos <- archiveTell archive
+    pos <- archiveBuilderTell archive
     if pos < 2 ^ (32 :: Int)
       then pure (fromIntegral pos :: Word32)
       else error "End-of-central-directory offset is too large (ZIP64 not yet supported)"
@@ -328,7 +328,7 @@ close archive = do
     centralDirectorySize
     centralDirectoryOffset
     archive
-  archiveClose archive
+  archiveBuilderClose archive
 
 writeCentralDirectoryHeader ::
   -- | Local header offset
@@ -336,7 +336,7 @@ writeCentralDirectoryHeader ::
   FileInfo ->
   -- | File name
   ByteString ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 writeCentralDirectoryHeader localHeaderOffset fileInfo fileName archive = do
   -- central file header signature
@@ -363,7 +363,7 @@ writeCentralDirectoryHeader localHeaderOffset fileInfo fileName archive = do
   writeLE32 archive localHeaderOffset
 
   -- file name
-  archiveWrite archive fileName
+  archiveBuilderWrite archive fileName
 
   -- extra field
   pure ()
@@ -378,7 +378,7 @@ writeEndOfCentralDirectoryRecord ::
   Word32 ->
   -- | Offset of the central directory
   Word32 ->
-  Archive ->
+  ArchiveBuilder ->
   IO ()
 writeEndOfCentralDirectoryRecord centralDirectoryCount centralDirectorySize centralDirectoryOffset archive = do
   -- end of central dir signature
@@ -410,17 +410,21 @@ writeEndOfCentralDirectoryRecord centralDirectoryCount centralDirectorySize cent
 
 -- Little-endian encoding
 
-writeLE16 :: Archive -> Word16 -> IO ()
+writeLE16 :: ArchiveBuilder -> Word16 -> IO ()
 writeLE16 archive value = do
-  archiveWrite archive . ByteString.singleton . fromIntegral $ 0x000000FF .&. value
-  archiveWrite archive . ByteString.singleton . fromIntegral $ (0x0000FF00 .&. value) `shiftR` 8
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $ 0x000000FF .&. value
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $
+    (0x0000FF00 .&. value) `shiftR` 8
 
-writeLE32 :: Archive -> Word32 -> IO ()
+writeLE32 :: ArchiveBuilder -> Word32 -> IO ()
 writeLE32 archive value = do
-  archiveWrite archive . ByteString.singleton . fromIntegral $ 0x000000FF .&. value
-  archiveWrite archive . ByteString.singleton . fromIntegral $ (0x0000FF00 .&. value) `shiftR` 8
-  archiveWrite archive . ByteString.singleton . fromIntegral $ (0x00FF0000 .&. value) `shiftR` 16
-  archiveWrite archive . ByteString.singleton . fromIntegral $ (0xFF000000 .&. value) `shiftR` 24
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $ 0x000000FF .&. value
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $
+    (0x0000FF00 .&. value) `shiftR` 8
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $
+    (0x00FF0000 .&. value) `shiftR` 16
+  archiveBuilderWrite archive . ByteString.singleton . fromIntegral $
+    (0xFF000000 .&. value) `shiftR` 24
 
 -- `Handle` operations
 
