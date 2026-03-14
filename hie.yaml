@@ -1,10 +1,13 @@
 cradle:
   cabal:
-    - path: "src"
+    - path: "zippy/src"
       component: "lib:zippy"
 
-    - path: "app/Main.hs"
+    - path: "zippy/app/Main.hs"
       component: "zippy:exe:zippy"
 
-    - path: "test"
+    - path: "zippy/test"
       component: "zippy:test:zippy-tests"
+
+    - path: "zippy-streaming/src"
+      component: "lib:zippy-streaming"

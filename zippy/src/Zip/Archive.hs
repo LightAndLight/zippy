@@ -20,12 +20,15 @@ module Zip.Archive
   , LocalFileHeader (..)
   , localFileHeaderCompressionMethod
   , localFileHeaderData
+  , LocalFileHeaderData (..)
 
     -- * Writing
   , ArchiveBuilder (..)
   , Change (..)
   , new
   , finish_
+  , add
+  , ContentSummary (..)
   , addCompressedContent
 
     -- ** Entry metadata
@@ -34,6 +37,7 @@ module Zip.Archive
     -- * Compression
   , Compression (..)
   , DeflateMode (..)
+  , deflateModeCompressionLevel
   , compress
   , Compressed (..)
 
@@ -137,6 +141,14 @@ data DeflateMode
   | SuperFast
   deriving (Show, Eq)
 
+deflateModeCompressionLevel :: DeflateMode -> Zlib.CompressionLevel
+deflateModeCompressionLevel mode =
+  case mode of
+    Normal -> Zlib.defaultCompression
+    Maximum -> Zlib.CompressionLevel 9
+    Fast -> Zlib.CompressionLevel 3 -- What do other implementations use?
+    SuperFast -> Zlib.CompressionLevel 1
+
 data Compressed
   = Compressed
       -- | Uncompressed size (precondition: @length < 2^32@)
@@ -160,48 +172,69 @@ compress compression content =
       Deflate mode ->
         let compressionParams =
               Zlib.defaultCompressParams
-                { Zlib.compressLevel =
-                    case mode of
-                      Normal -> Zlib.defaultCompression
-                      Maximum -> Zlib.CompressionLevel 9
-                      Fast -> Zlib.CompressionLevel 3 -- What do other implementations use?
-                      SuperFast -> Zlib.CompressionLevel 1
+                { Zlib.compressLevel = deflateModeCompressionLevel mode
                 , Zlib.compressMethod = Zlib.deflateMethod
                 }
         in LazyByteString.toStrict (Zlib.compressWith compressionParams $ LazyByteString.fromStrict content)
   where
     uncompressedSize = fromIntegral (ByteString.length content) :: Word64
 
-addCompressedContent ::
+data ContentSummary
+  = ContentSummary
+      -- | Uncompressed size
+      !Word64
+      -- | CRC-32
+      !Word32
+      -- | Compression method
+      !Compression
+      -- | Compressed size
+      !Word64
+
+add ::
   -- | File name (precondition: @length < 2^16@)
   ByteString ->
-  -- | Compressed content
-  Compressed ->
+  {-| Action that writes content to the archive.
+
+  When the action is run, the file is already at the correct seek position for writing the new entry.
+
+  Arguments:
+
+  * Function that writes to the archive (and advances seek position)
+  -}
+  ((ByteString -> IO ()) -> IO ContentSummary) ->
   ArchiveBuilder ->
   IO ()
-addCompressedContent fileName (Compressed uncompressedSize crc32 compression compressedContent) archive = do
+add fileName m archive = do
   localHeaderOffset <- do
     offset <- fileTell $ archiveBuilderFile archive
     if offset < 2 ^ (32 :: Int)
       then pure (fromIntegral offset :: Word32)
       else error $ "ZIP file is too large (ZIP64 not yet supported)"
 
-  uncompressedSize' <- do
-    if uncompressedSize < 2 ^ (32 :: Int)
-      then pure (fromIntegral uncompressedSize :: Word32)
-      else error $ "ZIP file entry's uncompressed content is too large (ZIP64 not yet supported)"
-
-  compressedSize <- do
-    let len = ByteString.length compressedContent
-    if len < 2 ^ (32 :: Int)
-      then pure (fromIntegral len :: Word32)
-      else error $ "ZIP file entry's compressed content is too large (ZIP64 not yet supported)"
-
   fileNameLength <- do
     let len = ByteString.length fileName
     if len < 2 ^ (16 :: Int)
       then pure (fromIntegral len :: Word16)
       else error $ "ZIP file entry's file name is too large (ZIP64 not yet supported)"
+
+  let extraFieldLength = 0
+
+  fileSeek (archiveBuilderFile archive) $
+    fromIntegral localHeaderOffset + localFileHeaderSize fileNameLength extraFieldLength
+
+  ContentSummary uncompressedSize crc32 compression compressedSize <-
+    m $ fileWrite (archiveBuilderFile archive)
+  nextOffset <- fileTell $ archiveBuilderFile archive
+
+  uncompressedSize' <- do
+    if uncompressedSize < 2 ^ (32 :: Int)
+      then pure (fromIntegral uncompressedSize :: Word32)
+      else error $ "ZIP file entry's uncompressed content is too large (ZIP64 not yet supported)"
+
+  compressedSize' <- do
+    if compressedSize < 2 ^ (32 :: Int)
+      then pure (fromIntegral compressedSize :: Word32)
+      else error $ "ZIP file entry's compressed content is too large (ZIP64 not yet supported)"
 
   let
     fileInfo =
@@ -273,16 +306,32 @@ addCompressedContent fileName (Compressed uncompressedSize crc32 compression com
         , fileInfoLastModFileTime = 0
         , fileInfoLastModFileDate = 0
         , fileInfoCrc32 = crc32
-        , fileInfoCompressedSize = compressedSize
+        , fileInfoCompressedSize = compressedSize'
         , fileInfoUncompressedSize = uncompressedSize'
         , fileInfoFileNameLength = fileNameLength
         , fileInfoExtraFieldLength = 0
         }
+
+  fileSeek (archiveBuilderFile archive) $ fromIntegral localHeaderOffset
   writeLocalFileHeader fileInfo fileName archive
-  fileWrite (archiveBuilderFile archive) compressedContent
+
+  fileSeek (archiveBuilderFile archive) nextOffset
 
   let change = Added localHeaderOffset fileInfo fileName
   modifyIORef' (archiveBuilderChanges archive) (`DList.snoc` change)
+
+addCompressedContent ::
+  -- | File name (precondition: @length < 2^16@)
+  ByteString ->
+  -- | Compressed content
+  Compressed ->
+  ArchiveBuilder ->
+  IO ()
+addCompressedContent fileName (Compressed uncompressedSize crc32 compression compressedContent) =
+  add fileName $ \write -> do
+    compressedSize <- pure $! fromIntegral (ByteString.length compressedContent)
+    write compressedContent
+    pure $ ContentSummary uncompressedSize crc32 compression compressedSize
 
 writeLocalFileHeader ::
   FileInfo ->
@@ -518,6 +567,15 @@ centralDirectoryHeaderLocalHeader (CentralDirectoryHeader file offset) = do
 data LocalFileHeader
   = LocalFileHeader {localFileHeaderFile :: !File, localFileHeaderOffset :: !Word64}
 
+localFileHeaderSize ::
+  -- | File name length
+  Word16 ->
+  -- | Extra field length
+  Word16 ->
+  Word64
+localFileHeaderSize fileNameLength extraFieldLength =
+  4 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + fromIntegral fileNameLength + fromIntegral extraFieldLength
+
 localFileHeaderCompressionMethod :: LocalFileHeader -> IO Word16
 localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
   fileSeek file $
@@ -527,7 +585,7 @@ localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
       (4 + 2 + 2)
   readLE16 file
 
-localFileHeaderData :: LocalFileHeader -> IO ByteString
+localFileHeaderData :: LocalFileHeader -> IO LocalFileHeaderData
 localFileHeaderData (LocalFileHeader file offset) = do
   fileSeek file $
     offset
@@ -545,25 +603,33 @@ localFileHeaderData (LocalFileHeader file offset) = do
         (4 + 2 + 2 + 2 + 2 + 2 + 4)
     readLE32 file
 
-  fileSeek file $
-    offset
-      +
-      -- data
-      ( 4
-          + 2
-          + 2
-          + 2
-          + 2
-          + 2
-          + 4
-          + 4
-          + 4
-          + 2
-          + 2
-          + fromIntegral fileNameLength
-          + fromIntegral extraFieldLength
+  pure $
+    LocalFileHeaderData
+      ( offset
+          +
+          -- data
+          ( 4
+              + 2
+              + 2
+              + 2
+              + 2
+              + 2
+              + 4
+              + 4
+              + 4
+              + 2
+              + 2
+              + fromIntegral fileNameLength
+              + fromIntegral extraFieldLength
+          )
       )
-  fileRead file $ fromIntegral compressedSize
+      (fromIntegral compressedSize)
+
+data LocalFileHeaderData
+  = LocalFileHeaderData
+  { localFileHeaderDataOffset :: !Word64
+  , localFileHeaderDataSize :: !Word64
+  }
 
 data File
   = File

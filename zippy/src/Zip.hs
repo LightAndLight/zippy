@@ -28,11 +28,15 @@ import Zip.Archive
   , Compressed (..)
   , Compression (..)
   , DeflateMode (..)
+  , LocalFileHeaderData (..)
   , addCompressedContent
   , archiveCentralDirectory
+  , archiveFile
   , centralDirectoryHeaderLocalHeader
   , close
   , compress
+  , fileRead
+  , fileSeek
   , findInCentralDirectory
   , finish_
   , localFileHeaderCompressionMethod
@@ -110,7 +114,10 @@ readContent fileName archive = do
     Nothing -> pure Nothing
     Just centralDirectoryHeader -> do
       localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
-      compressedContent <- localFileHeaderData localFileHeader
+      compressedContent <- do
+        LocalFileHeaderData offset size <- localFileHeaderData localFileHeader
+        fileSeek (archiveFile archive) offset
+        fileRead (archiveFile archive) size
       compressionMethod <- localFileHeaderCompressionMethod localFileHeader
       uncompressedContent <-
         case compressionMethod of
