@@ -37,7 +37,12 @@ cliParser =
     readParser =
       Read
         <$> Options.strArgument (Options.metavar "NAME" <> Options.help "File to read from archive")
-        <*> Options.strOption (Options.long "input" <> Options.short 'i' <> Options.metavar "FILE" <> Options.help "Archive to read")
+        <*> Options.strOption
+          ( Options.long "input"
+              <> Options.short 'i'
+              <> Options.metavar "FILE"
+              <> Options.help "Archive to read"
+          )
 
 main :: IO ()
 main = do
@@ -53,7 +58,7 @@ create ::
   FilePath ->
   IO ()
 create inputs output = do
-  archive <- Zip.create output
+  archive <- Zip.new output
   for_ inputs $ \input -> do
     putStrLn $ "Adding " ++ input ++ "..."
     Zip.addFile input archive
