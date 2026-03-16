@@ -577,7 +577,19 @@ localFileHeaderSize ::
   Word16 ->
   Word64
 localFileHeaderSize fileNameLength extraFieldLength =
-  4 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + fromIntegral fileNameLength + fromIntegral extraFieldLength
+  4
+    + 2
+    + 2
+    + 2
+    + 2
+    + 2
+    + 4
+    + 4
+    + 4
+    + 2
+    + 2
+    + fromIntegral fileNameLength
+    + fromIntegral extraFieldLength
 
 localFileHeaderCompressionMethod :: LocalFileHeader -> IO Word16
 localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
