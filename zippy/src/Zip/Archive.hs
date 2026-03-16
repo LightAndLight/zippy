@@ -1,3 +1,5 @@
+{-# LANGUAGE RankNTypes #-}
+
 {-| Low-level ZIP archive manipulation
 
 Reference: <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>
@@ -47,7 +49,7 @@ module Zip.Archive
 where
 
 import qualified Codec.Compression.Zlib as Zlib
-import Control.Exception (Exception, throwIO)
+import Control.Exception (Exception, SomeException, throwIO, try)
 import Control.Monad (unless)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
 import Data.ByteString (ByteString)
@@ -59,6 +61,7 @@ import qualified Data.Digest.CRC32 as CRC32
 import Data.Foldable (foldlM)
 import Data.IORef (IORef, modifyIORef', newIORef, readIORef)
 import Data.Word (Word16, Word32, Word64)
+import GHC.Stack (CallStack, HasCallStack, callStack, prettyCallStack, withFrozenCallStack)
 import System.IO
   ( Handle
   , IOMode (..)
@@ -643,7 +646,7 @@ data File
 
   Seek position is advanced by the number of bytes written.
   -}
-  , fileSeek :: Word64 -> IO ()
+  , fileSeek :: HasCallStack => Word64 -> IO ()
   -- ^ Set the seek position.
   , fileTell :: IO Word64
   -- ^ Get the seek position.
@@ -658,11 +661,28 @@ handleToFile handle =
   File
     { fileRead = ByteString.hGet handle . fromIntegral
     , fileWrite = ByteString.hPut handle
-    , fileSeek = hSeek handle AbsoluteSeek . fromIntegral
+    , fileSeek = withFrozenCallStack (withCallStack . hSeek handle AbsoluteSeek . fromIntegral)
     , fileTell = fromIntegral <$> hTell handle
     , fileSize = fromIntegral <$> hFileSize handle
     , fileClose = hClose handle
     }
+
+data WithCallStack = WithCallStack CallStack SomeException
+
+instance Show WithCallStack where
+  show (WithCallStack cs err) =
+    show err
+      ++ "\n"
+      ++ unlines (fmap ("  " ++) (lines $ prettyCallStack cs))
+
+instance Exception WithCallStack
+
+withCallStack :: HasCallStack => IO a -> IO a
+withCallStack ma = do
+  result <- try ma
+  case result of
+    Left err -> throwIO $ WithCallStack callStack err
+    Right a -> pure a
 
 data ZipException
   = EndOfCentralDirectoryRecordNotFound
