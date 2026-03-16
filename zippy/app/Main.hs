@@ -1,6 +1,6 @@
 module Main where
 
-import Control.Applicative (many)
+import Control.Applicative (many, (<**>))
 import qualified Data.ByteString.Char8 as ByteString
 import qualified Data.ByteString.UTF8 as Utf8
 import Data.Foldable (for_)
@@ -46,7 +46,7 @@ cliParser =
 
 main :: IO ()
 main = do
-  cli <- Options.execParser $ Options.info cliParser Options.fullDesc
+  cli <- Options.execParser $ Options.info (cliParser <**> Options.helper) Options.fullDesc
   case cli of
     Create inputs output -> create inputs output
     Read fileName input -> read fileName input
