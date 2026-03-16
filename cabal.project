@@ -1,3 +1,4 @@
 packages:
   zippy
+  zippy-benchmarks
   zippy-streaming

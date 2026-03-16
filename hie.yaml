@@ -9,5 +9,8 @@ cradle:
     - path: "zippy/test"
       component: "zippy:test:zippy-tests"
 
+    - path: "zippy-benchmarks/bench/Main.hs"
+      component: "zippy-benchmarks:bench:zippy-benchmarks"
+
     - path: "zippy-streaming/src"
       component: "lib:zippy-streaming"
