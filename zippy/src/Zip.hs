@@ -13,6 +13,10 @@ module Zip
   , finish_
   , addFile
   , addContent
+
+    -- * Compression methods
+  , Compression (..)
+  , DeflateMode (..)
   )
 where
 
