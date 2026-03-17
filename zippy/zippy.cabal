@@ -35,7 +35,7 @@ executable zippy
     import:           warnings
     main-is:          Main.hs
     build-depends:
-        base >=4 && <5,
+        base,
         bytestring,
         optparse-applicative,
         utf8-string,
@@ -48,7 +48,14 @@ test-suite zippy-tests
     type:             exitcode-stdio-1.0
     main-is:          Main.hs
     build-depends:
-        base >=4 && <5,
+        base,
+        bytestring,
+        containers,
+        filepath,
+        hedgehog,
+        mmorph,
+        mtl,
+        temporary,
         zippy
     hs-source-dirs:   test
     default-language: Haskell98
