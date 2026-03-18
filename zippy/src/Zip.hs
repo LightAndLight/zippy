@@ -6,6 +6,7 @@ module Zip
   , close
   , readContent
   , RepeatedEntryException (..)
+  , readContents
 
     -- * Writing
   , ArchiveBuilder
@@ -21,33 +22,26 @@ module Zip
   )
 where
 
-import qualified Codec.Compression.Zlib as Zlib
 import Control.Exception (bracket, throwIO)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
-import qualified Data.ByteString.Lazy as LazyByteString
 import qualified Data.ByteString.UTF8 as Utf8
+import Data.Traversable (for)
 import Zip.Archive
   ( Archive
   , ArchiveBuilder (..)
   , Compressed (..)
   , Compression (..)
   , DeflateMode (..)
-  , File (..)
-  , LocalFileHeaderData (..)
   , RepeatedEntryException (..)
   , addCompressedContent
   , archiveCentralDirectory
-  , archiveFile
   , centralDirectoryHeaderLocalHeader
   , close
   , compress
-  , fileRead
-  , fileSeek
+  , extract
   , findInCentralDirectory
   , finish_
-  , localFileHeaderCompressionMethod
-  , localFileHeaderData
   , new
   , open
   )
@@ -119,28 +113,29 @@ readContent ::
   Archive ->
   IO (Maybe ByteString)
 readContent fileName archive = do
-  mCentralDirectoryHeader <- findInCentralDirectory fileName (archiveCentralDirectory archive)
-  case mCentralDirectoryHeader of
+  centralDirectoryHeaders <- findInCentralDirectory fileName (archiveCentralDirectory archive)
+  case centralDirectoryHeaders of
     [] -> pure Nothing
     [centralDirectoryHeader] -> do
       localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
-      compressedContent <- do
-        LocalFileHeaderData offset size <- localFileHeaderData localFileHeader
-        fileSeek (archiveFile archive) offset
-        fileRead (archiveFile archive) size
-      compressionMethod <- localFileHeaderCompressionMethod localFileHeader
-      uncompressedContent <-
-        case compressionMethod of
-          0 ->
-            -- The file is stored (no compression)
-            pure compressedContent
-          8 ->
-            -- The file is Deflated
-            pure $!
-              LazyByteString.toStrict
-                (Zlib.decompressWith Zlib.defaultDecompressParams $ LazyByteString.fromStrict compressedContent)
-          _ ->
-            error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
+      uncompressedContent <- extract localFileHeader
       pure $ Just uncompressedContent
     entries ->
       throwIO $ RepeatedEntryException fileName (fromIntegral $ length entries)
+
+{-| Read all entries from the archive with the given file name.
+
+Provided for completeness. Most ZIP archives do not have duplicate entries, so 'readContent' is
+generally enough.
+-}
+readContents ::
+  -- | File name
+  ByteString ->
+  Archive ->
+  IO [ByteString]
+readContents fileName archive = do
+  centralDirectoryHeaders <- findInCentralDirectory fileName (archiveCentralDirectory archive)
+  for centralDirectoryHeaders $ \centralDirectoryHeader -> do
+    localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
+    uncompressedContent <- extract localFileHeader
+    pure uncompressedContent

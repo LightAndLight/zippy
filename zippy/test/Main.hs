@@ -6,7 +6,6 @@
 
 module Main where
 
-import Control.Monad (guard)
 import Control.Monad.IO.Class (MonadIO, liftIO)
 import Control.Monad.Morph (hoist)
 import Control.Monad.Reader (ReaderT, runReaderT)
@@ -17,7 +16,7 @@ import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Kind (Type)
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Data.Maybe (isJust, isNothing)
+import Data.Maybe (fromMaybe)
 import Data.String (fromString)
 import GHC.Generics (Generic)
 import Hedgehog hiding (label)
@@ -50,13 +49,11 @@ isWriteable :: ArchiveStatus read write closed -> Bool
 isWriteable Writeable{} = True
 isWriteable _ = False
 
+type ModelArchive = Map ByteString [ByteString]
+
 data Model (v :: Type -> Type)
   = Model
-  { modelArchiveStatus ::
-      ArchiveStatus
-        (Map ByteString ByteString)
-        (Map ByteString ByteString)
-        (Map ByteString ByteString)
+  { modelArchiveStatus :: ArchiveStatus ModelArchive ModelArchive ModelArchive
   }
 
 initialModel :: Model v
@@ -248,7 +245,12 @@ cAddContents =
                 model
                   { modelArchiveStatus =
                       Writeable archiveName $
-                        foldl' (\acc (fileName, fileContent) -> Map.insert fileName fileContent acc) archive entries
+                        foldl'
+                          ( \acc (fileName, fileContent) ->
+                              Map.insertWith (\new old -> old ++ new) fileName [fileContent] acc
+                          )
+                          archive
+                          entries
                   }
               _ -> error "model archive is not writeable"
         , Ensure $ \_old _new (CAddContents _entries) () -> pure ()
@@ -257,51 +259,55 @@ cAddContents =
   where
     maxEntries = 50
 
-data CReadContent (v :: Type -> Type)
-  = CReadContent
+data CReadContents (v :: Type -> Type)
+  = CReadContents
       -- | File name
       ByteString
   deriving (Show, Generic, FunctorB, TraversableB)
 
-cReadContent ::
+cReadContents ::
   MonadGen gen =>
   (MonadReader Env m, MonadIO m) =>
   Command gen m Model
-cReadContent =
+cReadContents =
   Command
     { commandGen = \model ->
         case modelArchiveStatus model of
           Readable _archiveName archive ->
             Just $
-              CReadContent
+              CReadContents
                 <$> Gen.choice
                   ( [Gen.bytes (Range.constant 1 10)]
                       ++ [Gen.element (Map.keys archive) | not $ Map.null archive]
                   )
           _ ->
             Nothing
-    , commandExecute = \(CReadContent fileName) -> do
+    , commandExecute = \(CReadContents fileName) -> do
         archiveStatusRef <- asks envArchiveStatusRef
         archiveStatus <- liftIO $ readIORef archiveStatusRef
         case archiveStatus of
           Readable _archiveName archive -> liftIO $ do
-            Zip.readContent fileName archive
+            Zip.readContents fileName archive
           _ -> error "actual archive is not readable"
     , commandCallbacks =
         [ labelWith $ \model output ->
             "read content "
-              ++ maybe "(missing) " (const "(present) ") output
+              ++ ( case output of
+                     [] -> "(missing) "
+                     [_] -> "(present) "
+                     _ -> "(multiple) "
+                 )
               ++ case modelArchiveStatus model of
                 Readable _archiveName archive ->
                   if Map.size archive <= 5
                     then "(<= 5)"
                     else "(> 5)"
                 _ -> error "model archive is not readable"
-        , Require $ \model (CReadContent _fileName) -> isReadable $ modelArchiveStatus model
-        , Ensure $ \old _new (CReadContent fileName) output ->
+        , Require $ \model (CReadContents _fileName) -> isReadable $ modelArchiveStatus model
+        , Ensure $ \old _new (CReadContents fileName) output ->
             case modelArchiveStatus old of
               Readable _archiveName archive -> do
-                output === Map.lookup fileName archive
+                output === fromMaybe [] (Map.lookup fileName archive)
               _ -> error "actual archive is not readable"
         ]
     }
@@ -316,11 +322,11 @@ commands =
   , cOpen
   , cClose
   , cAddContents
-  , cReadContent
+  , cReadContents
   ]
 
 prop_correctness :: Property
-prop_correctness = property $ do
+prop_correctness = withTests 1000 . property $ do
   actions <- forAll $ Gen.sequential (Range.constant 0 100) initialModel commands
   hoist runWithEnv $ executeSequential initialModel actions
   where

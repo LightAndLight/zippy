@@ -25,6 +25,7 @@ module Zip.Archive
   , localFileHeaderCompressionMethod
   , localFileHeaderData
   , LocalFileHeaderData (..)
+  , extract
 
     -- * Writing
   , ArchiveBuilder (..)
@@ -705,6 +706,26 @@ data LocalFileHeaderData
   { localFileHeaderDataOffset :: !Word64
   , localFileHeaderDataSize :: !Word64
   }
+
+-- | Read and decompress the content of a local file header.
+extract :: LocalFileHeader -> IO ByteString
+extract localFileHeader@(LocalFileHeader file _offset) = do
+  compressedContent <- do
+    LocalFileHeaderData offset size <- localFileHeaderData localFileHeader
+    fileSeek file offset
+    fileRead file size
+  compressionMethod <- localFileHeaderCompressionMethod localFileHeader
+  case compressionMethod of
+    0 ->
+      -- The file is stored (no compression)
+      pure compressedContent
+    8 ->
+      -- The file is Deflated
+      pure $!
+        LazyByteString.toStrict
+          (Zlib.decompressWith Zlib.defaultDecompressParams $ LazyByteString.fromStrict compressedContent)
+    _ ->
+      error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
 
 data File
   = File
