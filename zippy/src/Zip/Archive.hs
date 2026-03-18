@@ -782,21 +782,23 @@ open path = do
     findEndOfCentralDirectoryRecord :: File -> IO (Maybe EndOfCentralDirectoryRecord)
     findEndOfCentralDirectoryRecord file = do
       size <- fileSize file
+      if size <= 0
+        then pure Nothing
+        else do
+          let
+            chunkOffset
+              -- read the entire file
+              | chunkSize > size = 0
+              -- read a chunk from the end of the file
+              | otherwise = size - chunkSize
 
-      let
-        chunkOffset
-          -- read the entire file
-          | chunkSize > size = 0
-          -- read a chunk from the end of the file
-          | otherwise = size - chunkSize
+            index
+              | chunkSize > size = size - 1
+              | otherwise = chunkSize - 1
 
-        index
-          | chunkSize > size = size - 1
-          | otherwise = chunkSize - 1
-
-      fileSeek file chunkOffset
-      chunk <- fileRead file chunkSize
-      step file size chunkOffset chunk index
+          fileSeek file chunkOffset
+          chunk <- fileRead file chunkSize
+          step file size chunkOffset chunk index
 
     step ::
       File ->
