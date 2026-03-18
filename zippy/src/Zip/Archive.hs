@@ -753,7 +753,7 @@ instance Exception ZipException
 
 open :: FilePath -> IO Archive
 open path = do
-  handle <- openFile path ReadWriteMode
+  handle <- openFile path ReadMode
   let file = handleToFile handle
 
   mEndOfCentralDirectoryRecord <- findEndOfCentralDirectoryRecord file
