@@ -501,37 +501,37 @@ findInCentralDirectory fileName centralDirectory = do
   let base = centralDirectoryOffset centralDirectory
   go count file base
   where
-    go count file base = do
-      signature <- do
-        fileSeek file base
-        readLE32 file
-      unless (signature == 0x02014b50) . error $
-        "missing central file header signature at offset " ++ show base
+    go count file base
+      | count == 0 = pure Nothing
+      | otherwise = do
+          signature <- do
+            fileSeek file base
+            readLE32 file
+          unless (signature == 0x02014b50) . error $
+            "missing central file header signature at offset " ++ show base
 
-      fileNameLength <- do
-        fileSeek file $
-          base
-            +
-            -- `file name length` field
-            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
-        readLE16 file
-      extraFieldLength <- readLE16 file
-      fileCommentLength <- readLE16 file
+          fileNameLength <- do
+            fileSeek file $
+              base
+                +
+                -- `file name length` field
+                (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
+            readLE16 file
+          extraFieldLength <- readLE16 file
+          fileCommentLength <- readLE16 file
 
-      fileName' <- do
-        fileSeek file $
-          base
-            +
-            -- `file name` field
-            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
-        fileRead file (fromIntegral fileNameLength)
+          fileName' <- do
+            fileSeek file $
+              base
+                +
+                -- `file name` field
+                (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
+            fileRead file (fromIntegral fileNameLength)
 
-      if fileName == fileName'
-        then do
-          pure $ Just (CentralDirectoryHeader file base)
-        else
-          if count > 1
+          if fileName == fileName'
             then do
+              pure $ Just (CentralDirectoryHeader file base)
+            else do
               let
                 base' =
                   base
@@ -542,8 +542,6 @@ findInCentralDirectory fileName centralDirectory = do
                     + fromIntegral extraFieldLength
                     + fromIntegral fileCommentLength
               go (count - 1) file base'
-            else
-              pure Nothing
 
 listFileNames ::
   CentralDirectory ->
@@ -554,32 +552,32 @@ listFileNames centralDirectory = do
   let base = centralDirectoryOffset centralDirectory
   go count file base
   where
-    go count file base = do
-      signature <- fileSeek file base *> readLE32 file
-      unless (signature == 0x02014b50) . error $
-        "missing central file header signature at offset " ++ show base
+    go count file base
+      | count == 0 = pure []
+      | otherwise = do
+          signature <- fileSeek file base *> readLE32 file
+          unless (signature == 0x02014b50) . error $
+            "missing central file header signature at offset " ++ show base
 
-      fileNameLength <- do
-        fileSeek file $
-          base
-            +
-            -- `file name length` field
-            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
-        readLE16 file
-      extraFieldLength <- readLE16 file
-      fileCommentLength <- readLE16 file
+          fileNameLength <- do
+            fileSeek file $
+              base
+                +
+                -- `file name length` field
+                (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
+            readLE16 file
+          extraFieldLength <- readLE16 file
+          fileCommentLength <- readLE16 file
 
-      fileName' <- do
-        fileSeek file $
-          base
-            +
-            -- `file name` field
-            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
-        fileRead file (fromIntegral fileNameLength)
+          fileName' <- do
+            fileSeek file $
+              base
+                +
+                -- `file name` field
+                (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
+            fileRead file (fromIntegral fileNameLength)
 
-      (:) fileName'
-        <$> if count > 1
-          then do
+          (:) fileName' <$> do
             let
               base' =
                 base
@@ -590,8 +588,6 @@ listFileNames centralDirectory = do
                   + fromIntegral extraFieldLength
                   + fromIntegral fileCommentLength
             go (count - 1) file base'
-          else
-            pure []
 
 data CentralDirectoryHeader
   = CentralDirectoryHeader
@@ -812,7 +808,7 @@ open path = do
       Word64 ->
       IO (Maybe EndOfCentralDirectoryRecord)
     step file size chunkOffset chunk index =
-      if index < 4
+      if index < 3
         then
           -- signature cannot be (completely) in this chunk
           nextChunk file size chunkOffset
