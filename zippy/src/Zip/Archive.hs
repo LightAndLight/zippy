@@ -13,6 +13,7 @@ module Zip.Archive
     -- ** Central directory
   , CentralDirectory (..)
   , findInCentralDirectory
+  , listFileNames
 
     -- *** Central directory header
   , CentralDirectoryHeader (..)
@@ -543,6 +544,54 @@ findInCentralDirectory fileName centralDirectory = do
               go (count - 1) file base'
             else
               pure Nothing
+
+listFileNames ::
+  CentralDirectory ->
+  IO [ByteString]
+listFileNames centralDirectory = do
+  let count = centralDirectoryCount centralDirectory
+  let file = centralDirectoryFile centralDirectory
+  let base = centralDirectoryOffset centralDirectory
+  go count file base
+  where
+    go count file base = do
+      signature <- fileSeek file base *> readLE32 file
+      unless (signature == 0x02014b50) . error $
+        "missing central file header signature at offset " ++ show base
+
+      fileNameLength <- do
+        fileSeek file $
+          base
+            +
+            -- `file name length` field
+            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4)
+        readLE16 file
+      extraFieldLength <- readLE16 file
+      fileCommentLength <- readLE16 file
+
+      fileName' <- do
+        fileSeek file $
+          base
+            +
+            -- `file name` field
+            (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
+        fileRead file (fromIntegral fileNameLength)
+
+      (:) fileName'
+        <$> if count > 1
+          then do
+            let
+              base' =
+                base
+                  +
+                  -- `file name` field
+                  (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
+                  + fromIntegral fileNameLength
+                  + fromIntegral extraFieldLength
+                  + fromIntegral fileCommentLength
+            go (count - 1) file base'
+          else
+            pure []
 
 data CentralDirectoryHeader
   = CentralDirectoryHeader
