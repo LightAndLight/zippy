@@ -13,6 +13,7 @@ module Zip.Archive
     -- ** Central directory
   , CentralDirectory (..)
   , findInCentralDirectory
+  , RepeatedEntryException (..)
   , listFileNames
 
     -- *** Central directory header
@@ -494,7 +495,8 @@ findInCentralDirectory ::
   -- | File name
   ByteString ->
   CentralDirectory ->
-  IO (Maybe CentralDirectoryHeader)
+  -- | Entries with the given file name
+  IO [CentralDirectoryHeader]
 findInCentralDirectory fileName centralDirectory = do
   let count = centralDirectoryCount centralDirectory
   let file = centralDirectoryFile centralDirectory
@@ -502,7 +504,7 @@ findInCentralDirectory fileName centralDirectory = do
   go count file base
   where
     go count file base
-      | count == 0 = pure Nothing
+      | count == 0 = pure []
       | otherwise = do
           signature <- do
             fileSeek file base
@@ -528,10 +530,8 @@ findInCentralDirectory fileName centralDirectory = do
                 (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4 + 4)
             fileRead file (fromIntegral fileNameLength)
 
-          if fileName == fileName'
-            then do
-              pure $ Just (CentralDirectoryHeader file base)
-            else do
+          let
+            continue = do
               let
                 base' =
                   base
@@ -542,6 +542,21 @@ findInCentralDirectory fileName centralDirectory = do
                     + fromIntegral extraFieldLength
                     + fromIntegral fileCommentLength
               go (count - 1) file base'
+
+          if fileName == fileName'
+            then (CentralDirectoryHeader file base :) <$> continue
+            else continue
+
+-- | The archive contains more than one entry with the same file name.
+data RepeatedEntryException
+  = RepeatedEntryException
+      -- | File name
+      !ByteString
+      -- | Number of entries with this filename
+      !Word64
+  deriving (Show)
+
+instance Exception RepeatedEntryException
 
 listFileNames ::
   CentralDirectory ->

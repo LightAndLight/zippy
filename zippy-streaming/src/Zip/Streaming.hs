@@ -26,6 +26,7 @@ import Zip.Archive
   ( Compression (..)
   , ContentSummary (..)
   , LocalFileHeaderData (..)
+  , RepeatedEntryException (..)
   , add
   , archiveCentralDirectory
   , archiveFile
@@ -85,8 +86,8 @@ readByteStream ::
 readByteStream fileName archive = do
   mCentralDirectoryHeader <- findInCentralDirectory fileName (archiveCentralDirectory archive)
   case mCentralDirectoryHeader of
-    Nothing -> pure Nothing
-    Just centralDirectoryHeader -> do
+    [] -> pure Nothing
+    [centralDirectoryHeader] -> do
       localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
       compressedStream <- do
         LocalFileHeaderData dataOffset dataSize <- localFileHeaderData localFileHeader
@@ -103,6 +104,8 @@ readByteStream fileName archive = do
           _ ->
             error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
       pure $ Just uncompressedContent
+    entries ->
+      throwIO $ RepeatedEntryException fileName (fromIntegral $ length entries)
   where
     reading ::
       -- \| File offset

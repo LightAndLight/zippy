@@ -5,6 +5,7 @@ module Zip
   , open
   , close
   , readContent
+  , RepeatedEntryException (..)
 
     -- * Writing
   , ArchiveBuilder
@@ -21,7 +22,7 @@ module Zip
 where
 
 import qualified Codec.Compression.Zlib as Zlib
-import Control.Exception (bracket)
+import Control.Exception (bracket, throwIO)
 import Data.ByteString (ByteString)
 import qualified Data.ByteString as ByteString
 import qualified Data.ByteString.Lazy as LazyByteString
@@ -32,7 +33,9 @@ import Zip.Archive
   , Compressed (..)
   , Compression (..)
   , DeflateMode (..)
+  , File (..)
   , LocalFileHeaderData (..)
+  , RepeatedEntryException (..)
   , addCompressedContent
   , archiveCentralDirectory
   , archiveFile
@@ -106,7 +109,10 @@ addContent fileName content = do
     then addCompressedContent fileName compressed
     else addCompressedContent fileName (Compressed uncompressedSize crc32 Stored content)
 
--- | Read an entry from the archive (if the entry can be found).
+{-| Read an entry from the archive (if the entry can be found).
+
+Throws a 'RepeatedEntryException' if there are multiple entries with the given file name.
+-}
 readContent ::
   -- | File name
   ByteString ->
@@ -115,8 +121,8 @@ readContent ::
 readContent fileName archive = do
   mCentralDirectoryHeader <- findInCentralDirectory fileName (archiveCentralDirectory archive)
   case mCentralDirectoryHeader of
-    Nothing -> pure Nothing
-    Just centralDirectoryHeader -> do
+    [] -> pure Nothing
+    [centralDirectoryHeader] -> do
       localFileHeader <- centralDirectoryHeaderLocalHeader centralDirectoryHeader
       compressedContent <- do
         LocalFileHeaderData offset size <- localFileHeaderData localFileHeader
@@ -136,3 +142,5 @@ readContent fileName archive = do
           _ ->
             error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
       pure $ Just uncompressedContent
+    entries ->
+      throwIO $ RepeatedEntryException fileName (fromIntegral $ length entries)
