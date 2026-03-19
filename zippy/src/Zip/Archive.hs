@@ -48,6 +48,7 @@ module Zip.Archive
 
     -- * File operations
   , File (..)
+  , handleToFile
   )
 where
 

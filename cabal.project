@@ -1,4 +1,7 @@
 packages:
   zippy
   zippy-benchmarks
+  zippy-memory
   zippy-streaming
+
+tests: True

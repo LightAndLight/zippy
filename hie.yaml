@@ -12,5 +12,11 @@ cradle:
     - path: "zippy-benchmarks/bench/Main.hs"
       component: "zippy-benchmarks:bench:zippy-benchmarks"
 
+    - path: "zippy-memory/src"
+      component: "lib:zippy-memory"
+
+    - path: "zippy-memory/test"
+      component: "zippy-memory:test:zippy-memory-tests"
+
     - path: "zippy-streaming/src"
       component: "lib:zippy-streaming"

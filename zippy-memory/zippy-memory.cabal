@@ -1,0 +1,41 @@
+cabal-version:      3.0
+name:               zippy-memory
+version:            0.1.0.0
+-- synopsis:
+-- description:
+license:            MIT
+license-file:       LICENSE
+author:             Isaac Elliott
+maintainer:         isaace71295@gmail.com
+-- copyright:
+category:           Data
+build-type:         Simple
+extra-doc-files:    CHANGELOG.md
+
+common warnings
+    ghc-options: -Wall
+
+library
+    import:           warnings
+    exposed-modules:
+        Zip.Memory
+    build-depends:
+        base >=4 && <5,
+        bytestring,
+        zippy
+    hs-source-dirs:   src
+    default-language: Haskell98
+
+test-suite zippy-memory-tests
+    import:           warnings
+    type:             exitcode-stdio-1.0
+    main-is:          Main.hs
+    build-depends:
+        base >=4 && <5,
+        bytestring,
+        hedgehog,
+        mmorph,
+        mtl,
+        zippy-memory
+    hs-source-dirs:   test
+    default-language: Haskell98
