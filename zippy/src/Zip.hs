@@ -2,7 +2,9 @@ module Zip
   ( -- * Reading
     Archive
   , withArchive
+  , withArchiveFile
   , open
+  , openFile
   , close
   , readContent
   , RepeatedEntryException (..)
@@ -11,7 +13,9 @@ module Zip
     -- * Writing
   , ArchiveBuilder
   , create
+  , createFile
   , new
+  , newFile
   , finish_
   , addFile
   , addContent
@@ -19,6 +23,10 @@ module Zip
     -- * Compression methods
   , Compression (..)
   , DeflateMode (..)
+
+    -- * @File@ objects
+  , File (..)
+  , handleToFile
   )
 where
 
@@ -33,6 +41,7 @@ import Zip.Archive
   , Compressed (..)
   , Compression (..)
   , DeflateMode (..)
+  , File (..)
   , RepeatedEntryException (..)
   , addCompressedContent
   , archiveCentralDirectory
@@ -42,11 +51,18 @@ import Zip.Archive
   , extract
   , findInCentralDirectory
   , finish_
+  , handleToFile
   , new
+  , newFile
   , open
+  , openFile
   )
 
--- | Read (and automatically 'close') a ZIP archive.
+-- | Read (and automatically 'close') a ZIP archive from a 'File' object.
+withArchiveFile :: File -> (Archive -> IO a) -> IO a
+withArchiveFile file = bracket (openFile file) close
+
+-- | Read (and automatically 'close') a ZIP archive from the file system.
 withArchive ::
   -- | Archive path
   FilePath ->
@@ -54,7 +70,18 @@ withArchive ::
   IO a
 withArchive path = bracket (open path) close
 
--- | Create (and automatically 'finish_') a ZIP archive.
+-- | Create (and automatically 'finish_') a ZIP archive using a 'File' object.
+createFile ::
+  File ->
+  (ArchiveBuilder -> IO a) ->
+  IO a
+createFile file f = do
+  archive <- newFile file
+  a <- f archive
+  finish_ archive
+  pure a
+
+-- | Create (and automatically 'finish_') a ZIP archive on the file system.
 create ::
   -- | Archive path
   FilePath ->

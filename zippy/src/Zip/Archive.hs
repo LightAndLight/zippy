@@ -8,6 +8,7 @@ module Zip.Archive
   ( -- * Reading
     Archive (..)
   , open
+  , Zip.Archive.openFile
   , close
 
     -- ** Central directory
@@ -31,6 +32,7 @@ module Zip.Archive
   , ArchiveBuilder (..)
   , Change (..)
   , new
+  , newFile
   , finish_
   , add
   , ContentSummary (..)
@@ -84,13 +86,26 @@ data ArchiveBuilder
   , archiveBuilderChanges :: !(IORef (DList Change))
   }
 
-{-| Create an (incomplete) archive for writing.
+{-| Create an (incomplete) archive for writing, targeting a 'File' object.
+
+'finish_' must be called on the 'ArchiveBuilder' to produce a valid archive.
+-}
+newFile :: File -> IO ArchiveBuilder
+newFile file = do
+  changesRef <- newIORef DList.empty
+  pure
+    ArchiveBuilder
+      { archiveBuilderFile = file
+      , archiveBuilderChanges = changesRef
+      }
+
+{-| Create an (incomplete) archive for writing, on the file system.
 
 'finish_' must be called on the 'ArchiveBuilder' to produce a valid archive.
 -}
 new :: FilePath -> IO ArchiveBuilder
 new path = do
-  handle <- openFile path ReadWriteMode
+  handle <- System.IO.openFile path ReadWriteMode
   hSetFileSize handle 0
   changesRef <- newIORef DList.empty
   pure
@@ -358,7 +373,7 @@ writeLocalFileHeader fileInfo fileName archive = do
   -- extra field
   pure ()
 
-{-| Complete the construction of a ZIP archive.
+{-| Complete the construction of an archive.
 
 Also closes the underlying 'File'.
 -}
@@ -784,12 +799,17 @@ data ZipException
 
 instance Exception ZipException
 
+-- | Open an archive on the file system.
 open :: FilePath -> IO Archive
 open path = do
-  handle <- openFile path ReadMode
+  handle <- System.IO.openFile path ReadMode
   let file = handleToFile handle
+  Zip.Archive.openFile file
 
-  mEndOfCentralDirectoryRecord <- findEndOfCentralDirectoryRecord file
+-- | Use a 'File' object as a ZIP archive.
+openFile :: File -> IO Archive
+openFile file = do
+  mEndOfCentralDirectoryRecord <- findEndOfCentralDirectoryRecord
   case mEndOfCentralDirectoryRecord of
     Nothing ->
       throwIO EndOfCentralDirectoryRecordNotFound
@@ -812,8 +832,8 @@ open path = do
     chunkSize :: Word64
     chunkSize = 512
 
-    findEndOfCentralDirectoryRecord :: File -> IO (Maybe EndOfCentralDirectoryRecord)
-    findEndOfCentralDirectoryRecord file = do
+    findEndOfCentralDirectoryRecord :: IO (Maybe EndOfCentralDirectoryRecord)
+    findEndOfCentralDirectoryRecord = do
       size <- fileSize file
       if size <= 0
         then pure Nothing
@@ -831,10 +851,9 @@ open path = do
 
           fileSeek file chunkOffset
           chunk <- fileRead file chunkSize
-          step file size chunkOffset chunk index
+          step size chunkOffset chunk index
 
     step ::
-      File ->
       -- \| File size
       Word64 ->
       -- \| Chunk offset
@@ -844,11 +863,11 @@ open path = do
       -- \| Index in chunk
       Word64 ->
       IO (Maybe EndOfCentralDirectoryRecord)
-    step file size chunkOffset chunk index =
+    step size chunkOffset chunk index =
       if index < 3
         then
           -- signature cannot be (completely) in this chunk
-          nextChunk file size chunkOffset
+          nextChunk size chunkOffset
         else
           if ByteString.index chunk (fromIntegral index) == 0x06
             && ByteString.index chunk (fromIntegral $ index - 1) == 0x05
@@ -873,18 +892,17 @@ open path = do
                 then
                   pure $ Just (EndOfCentralDirectoryRecord file candidateSignatureOffset)
                 else
-                  nextChunk file size chunkOffset
+                  nextChunk size chunkOffset
             else
-              step file size chunkOffset chunk (index - 1)
+              step size chunkOffset chunk (index - 1)
 
     nextChunk ::
-      File ->
       -- \| File size
       Word64 ->
       -- \| Chunk offset
       Word64 ->
       IO (Maybe EndOfCentralDirectoryRecord)
-    nextChunk file size chunkOffset
+    nextChunk size chunkOffset
       | chunkOffset < chunkSize =
           pure Nothing
       | otherwise = do
@@ -896,7 +914,7 @@ open path = do
           let chunkOffset' = chunkOffset - chunkSize + 3
           fileSeek file chunkOffset'
           chunk' <- fileRead file chunkSize
-          step file size chunkOffset' chunk' (chunkSize - 1)
+          step size chunkOffset' chunk' (chunkSize - 1)
 
 close :: Archive -> IO ()
 close archive = fileClose $ archiveFile archive
