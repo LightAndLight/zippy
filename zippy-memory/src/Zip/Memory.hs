@@ -4,8 +4,13 @@
 {-# LANGUAGE UnboxedTuples #-}
 
 module Zip.Memory
-  ( memoryToFile
-  , Memory
+  ( -- * In-memory ZIP archives
+    createInMemory
+  , withArchiveInMemory
+
+    -- * In-memory @File@ interface
+  , memoryToFile
+  , Memory (..)
   , memoryNew
   , memoryFromByteString
   , memoryRead
@@ -51,7 +56,28 @@ import GHC.Exts
 import GHC.IO (IO (..), unIO)
 import GHC.Stack (HasCallStack)
 import GHC.Word (Word64 (..), Word8 (..))
+import qualified Zip
 import Zip.Archive (File (..))
+
+createInMemory ::
+  (Zip.ArchiveBuilder -> IO ()) ->
+  -- | Postcondition: 'ByteString' is a valid ZIP archive
+  IO ByteString
+createInMemory f = do
+  memory <- memoryNew
+  let file = memoryToFile memory
+  Zip.createFile file f
+  memoryToByteString memory
+
+withArchiveInMemory ::
+  -- | Precondition: is a valid ZIP archive
+  ByteString ->
+  (Zip.Archive -> IO ()) ->
+  IO ()
+withArchiveInMemory value f = do
+  memory <- memoryFromByteString value
+  let file = memoryToFile memory
+  Zip.withArchiveFile file f
 
 memoryToFile :: Memory -> File
 memoryToFile memory =
