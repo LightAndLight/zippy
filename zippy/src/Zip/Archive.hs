@@ -54,7 +54,7 @@ module Zip.Archive
   )
 where
 
-import qualified Codec.Compression.Zlib as Zlib
+import qualified Codec.Compression.Zlib.Raw as Deflate
 import Control.Exception (Exception, SomeException, throwIO, try)
 import Control.Monad (unless)
 import Data.Bits (shiftL, shiftR, (.&.), (.|.))
@@ -163,13 +163,13 @@ data DeflateMode
   | SuperFast
   deriving (Show, Eq)
 
-deflateModeCompressionLevel :: DeflateMode -> Zlib.CompressionLevel
+deflateModeCompressionLevel :: DeflateMode -> Deflate.CompressionLevel
 deflateModeCompressionLevel mode =
   case mode of
-    Normal -> Zlib.defaultCompression
-    Maximum -> Zlib.CompressionLevel 9
-    Fast -> Zlib.CompressionLevel 3 -- What do other implementations use?
-    SuperFast -> Zlib.CompressionLevel 1
+    Normal -> Deflate.defaultCompression
+    Maximum -> Deflate.CompressionLevel 9
+    Fast -> Deflate.CompressionLevel 3 -- What do other implementations use?
+    SuperFast -> Deflate.CompressionLevel 1
 
 data Compressed
   = Compressed
@@ -193,11 +193,11 @@ compress compression content =
       Stored -> content
       Deflate mode ->
         let compressionParams =
-              Zlib.defaultCompressParams
-                { Zlib.compressLevel = deflateModeCompressionLevel mode
-                , Zlib.compressMethod = Zlib.deflateMethod
+              Deflate.defaultCompressParams
+                { Deflate.compressLevel = deflateModeCompressionLevel mode
+                , Deflate.compressMethod = Deflate.deflateMethod
                 }
-        in LazyByteString.toStrict (Zlib.compressWith compressionParams $ LazyByteString.fromStrict content)
+        in LazyByteString.toStrict (Deflate.compressWith compressionParams $ LazyByteString.fromStrict content)
   where
     uncompressedSize = fromIntegral (ByteString.length content) :: Word64
 
@@ -626,6 +626,7 @@ data CentralDirectoryHeader
   { centralDirectoryHeaderFile :: !File
   , centralDirectoryHeaderOffset :: !Word64
   }
+  deriving (Show)
 
 centralDirectoryHeaderLocalHeader :: CentralDirectoryHeader -> IO LocalFileHeader
 centralDirectoryHeaderLocalHeader (CentralDirectoryHeader file offset) = do
@@ -633,7 +634,38 @@ centralDirectoryHeaderLocalHeader (CentralDirectoryHeader file offset) = do
     offset
       +
       -- `relative offset of local header` field
-      (4 + 2 + 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4 + 2 + 2 + 2 + 2 + 2 + 4)
+      ( 4 -- central file header signature
+          + 2 -- version made by
+          + 2 -- version needed to extract
+          + 2 -- general purpose bit flag
+          + 2 -- compression method
+          + 2 -- last mod file time
+          + 2 -- last mod file date
+          + 4 -- crc-32
+      )
+  compressedSize <- readLE32 file
+
+  fileSeek file $
+    offset
+      +
+      -- `relative offset of local header` field
+      ( 4 -- central file header signature
+          + 2 -- version made by
+          + 2 -- version needed to extract
+          + 2 -- general purpose bit flag
+          + 2 -- compression method
+          + 2 -- last mod file time
+          + 2 -- last mod file date
+          + 4 -- crc-32
+          + 4 -- compressed size
+          + 4 -- uncompressed size
+          + 2 -- file name length
+          + 2 -- extra field length
+          + 2 -- file comment length
+          + 2 -- disk number start
+          + 2 -- internal file attributes
+          + 4 -- external file attributes
+      )
 
   offset' <- readLE32 file
 
@@ -642,10 +674,15 @@ centralDirectoryHeaderLocalHeader (CentralDirectoryHeader file offset) = do
   unless (signature == 0x04034b50) . error $
     "missing local file header signature at offset " ++ show offset'
 
-  pure $ LocalFileHeader file (fromIntegral offset')
+  pure $ LocalFileHeader compressedSize file (fromIntegral offset')
 
 data LocalFileHeader
-  = LocalFileHeader {localFileHeaderFile :: !File, localFileHeaderOffset :: !Word64}
+  = LocalFileHeader
+  { localFileHeaderCompressedSize :: !Word32
+  , localFileHeaderFile :: !File
+  , localFileHeaderOffset :: !Word64
+  }
+  deriving (Show)
 
 localFileHeaderSize ::
   -- | File name length
@@ -669,7 +706,7 @@ localFileHeaderSize fileNameLength extraFieldLength =
     + fromIntegral extraFieldLength
 
 localFileHeaderCompressionMethod :: LocalFileHeader -> IO Word16
-localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
+localFileHeaderCompressionMethod (LocalFileHeader _compressedSize file offset) = do
   fileSeek file $
     offset
       +
@@ -678,7 +715,14 @@ localFileHeaderCompressionMethod (LocalFileHeader file offset) = do
   readLE16 file
 
 localFileHeaderData :: LocalFileHeader -> IO LocalFileHeaderData
-localFileHeaderData (LocalFileHeader file offset) = do
+localFileHeaderData (LocalFileHeader compressedSize file offset) = do
+  fileSeek file $
+    offset
+      + ( 4 -- local file header signature
+            + 2 -- version needed to extract
+        )
+  generalPurposeBitFlag <- readLE16 file
+
   fileSeek file $
     offset
       +
@@ -687,19 +731,19 @@ localFileHeaderData (LocalFileHeader file offset) = do
   fileNameLength <- readLE16 file
   extraFieldLength <- readLE16 file
 
-  compressedSize <- do
-    fileSeek file $
-      offset
-        +
-        -- `compressed size` field
-        (4 + 2 + 2 + 2 + 2 + 2 + 4)
-    readLE32 file
-
-  pure $
-    LocalFileHeaderData
-      ( offset
+  -- When bit 3 of the general purpose bit flag is set, the CRC-32,
+  -- compressed size, and uncompressed size fields of the local file header
+  -- are set to 0. Therefore the compressed size written in the central
+  -- directory header must be used instead.
+  --
+  -- If that bit isn't set, sanity check the local file header's compressed size
+  -- field.
+  unless (1 `shiftL` 3 .&. generalPurposeBitFlag /= 0) $ do
+    compressedSize' <- do
+      fileSeek file $
+        offset
           +
-          -- data
+          -- `compressed size` field
           ( 4
               + 2
               + 2
@@ -707,12 +751,34 @@ localFileHeaderData (LocalFileHeader file offset) = do
               + 2
               + 2
               + 4
-              + 4
-              + 4
-              + 2
-              + 2
-              + fromIntegral fileNameLength
-              + fromIntegral extraFieldLength
+          )
+      readLE32 file
+    unless (compressedSize == compressedSize')
+      . error
+      $ "compressed size in local file header doesn't match compressed size from central directory header (expected "
+        ++ show compressedSize
+        ++ ", got "
+        ++ show compressedSize'
+        ++ ")"
+
+  pure $
+    LocalFileHeaderData
+      ( offset
+          +
+          -- data
+          ( 4 -- local file header signature
+              + 2 -- version needed to extract
+              + 2 -- general purpose bit flag
+              + 2 -- compression method
+              + 2 -- last mod file time
+              + 2 -- last mod file date
+              + 4 -- crc-32
+              + 4 -- compressed size
+              + 4 -- uncompressed size
+              + 2 -- file name length
+              + 2 -- extra field length
+              + fromIntegral fileNameLength -- file name
+              + fromIntegral extraFieldLength -- extra field
           )
       )
       (fromIntegral compressedSize)
@@ -722,10 +788,11 @@ data LocalFileHeaderData
   { localFileHeaderDataOffset :: !Word64
   , localFileHeaderDataSize :: !Word64
   }
+  deriving (Show)
 
 -- | Read and decompress the content of a local file header.
 extract :: LocalFileHeader -> IO ByteString
-extract localFileHeader@(LocalFileHeader file _offset) = do
+extract localFileHeader@(LocalFileHeader _compressedSize file _offset) = do
   compressedContent <- do
     LocalFileHeaderData offset size <- localFileHeaderData localFileHeader
     fileSeek file offset
@@ -739,7 +806,7 @@ extract localFileHeader@(LocalFileHeader file _offset) = do
       -- The file is Deflated
       pure $!
         LazyByteString.toStrict
-          (Zlib.decompressWith Zlib.defaultDecompressParams $ LazyByteString.fromStrict compressedContent)
+          (Deflate.decompressWith Deflate.defaultDecompressParams $ LazyByteString.fromStrict compressedContent)
     _ ->
       error $ "Compression method " ++ show compressionMethod ++ " not yet supported"
 
@@ -764,6 +831,9 @@ data File
   , fileClose :: IO ()
   -- ^ Close the file.
   }
+
+instance Show File where
+  show File{} = "File{..}"
 
 handleToFile :: Handle -> File
 handleToFile handle =
